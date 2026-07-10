@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+eggs/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# dbt
+target/
+dbt_packages/
+dbt_modules/
+logs/
+user.yml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# uv
+uv.lock
+
+# Data files
+data/
+*.parquet
+*.csv
+
+
+.omo

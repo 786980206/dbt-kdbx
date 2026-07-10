@@ -1,0 +1,17 @@
+kdbx_test:
+  outputs:
+    dev_local:
+      type: kdbx
+      mode: local
+      database: /home/windsing/proj/dbt-kdbx/demo/data
+      storage_type: serialized
+    dev_remote:
+      type: kdbx
+      mode: remote
+      host: localhost
+      port: 5001
+      username: dev
+      password: dev
+      database: /home/windsing/proj/dbt-kdbx/demo/data
+      storage_type: serialized
+  target: dev_local
