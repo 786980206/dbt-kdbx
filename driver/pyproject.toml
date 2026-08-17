@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "adbc-driver-kdbx"
+version = "0.1.0"
+description = "ADBC driver for kdb+/KDB-X (dual backend: native IPC + embedded pykx)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "adbc-driver-manager>=1.11.0",
+    "pyarrow>=23.0.0",
+    "pykx>=4.0.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["kdbx_adbc"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"kdbx_adbc/libadbc_driver_kdbx.so" = "kdbx_adbc/libadbc_driver_kdbx.so"
+"kdbx_adbc/_backend_b.so" = "kdbx_adbc/_backend_b.so"
+"adbc.q" = "kdbx_adbc/adbc.q"

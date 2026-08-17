@@ -1,0 +1,3 @@
+[submodule "driver/thirdparty/nanoarrow"]
+	path = driver/thirdparty/nanoarrow
+	url = https://github.com/apache/arrow-nanoarrow.git
