@@ -616,6 +616,11 @@ AdbcStatusCode AdbcKdbxConnectionGetObjects(struct AdbcConnection* conn, int dep
               K tv = kK(cvecs)[idx_typename];
               if (tv->t == -KS) tn_sv = ArrowCharView(tv->s ? tv->s : "");
               else if (tv->t == KS) tn_sv = ArrowCharView(kS(tv)[ri] ? kS(tv)[ri] : "");
+              else if (tv->t == 0 && tv->n > ri) {
+                K elem = kK(tv)[ri];
+                if (elem->t == -KS) tn_sv = ArrowCharView(elem->s ? elem->s : "");
+                else if (elem->t == KC) { tn_sv.data = kC(elem); tn_sv.size_bytes = elem->n; }
+              }
             }
             ArrowArrayAppendString(
                 array.children[1]->children[0]->children[1]->children[0]->children[2]->children[0]->children[3],

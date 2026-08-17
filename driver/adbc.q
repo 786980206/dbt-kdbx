@@ -20,9 +20,12 @@ AdbcStatementExecuteSchema:{[sql]
 
 // @api: AdbcStatementExecuteUpdate
 AdbcStatementExecuteUpdate:{[sql]
-    // MVP: execute q expression, return 0 rows affected
-    value sql;
-    :0j};
+    // Execute a DML/DDL expression and report rows affected. q update/delete
+    // are functional (no mutation); dbt materialisations use upsert, so the
+    // server-side should execute a persisting expression. For now: value the
+    // sql; if it yields a scalar long, return it, else return 0.
+    result:value sql;
+    $[-7=type result; result; -6=type result; result; 0j]};
 
 // @api: AdbcStatementBulkIngest
 AdbcStatementBulkIngest:{[table;mode;ipc]
@@ -47,10 +50,15 @@ AdbcConnectionGetInfo:{[infoCodes]
 
 // @api: AdbcConnectionGetObjects
 AdbcConnectionGetObjects:{[depth;catalog;schema;table;column]
-    mt:meta trade;
     cols_t:cols trade;
     n:count cols_t;
-    tc:([] column_name:string cols_t; ordinal_position:1+til n; remarks:n#enlist ""; xdbc_type_name:string value each value mt);
+    // column_name as a symbol list: pykx IPC / C parsing turns q strings into
+    // char lists, which the C GetObjects parser does not handle for string
+    // columns. symbols round-trip cleanly and map to Arrow string.
+    // xdbc_type_name: q type codes ("p" timestamp, "s" symbol, "f" float,
+    // "j" long, ...). `string exec t from meta ...` yields one char list per
+    // column, which round-trips to the C parser cleanly.
+    tc:([] column_name:cols_t; ordinal_position:1+til n; remarks:n#enlist ""; xdbc_type_name:string exec t from meta trade);
     table_dict:`table_name`table_type`table_columns`table_constraints!(`trade;`TABLE;tc;enlist ());
     schema_dict:`db_schema_tables`db_schema_name!(enlist table_dict;`main);
     catalogs:`catalog_name`catalog_db_schemas!(`kdb;enlist schema_dict);

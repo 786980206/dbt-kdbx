@@ -42,8 +42,13 @@ def close() -> None:
 
 
 def _as_q_string(sql: str) -> "kx.q":
-    """pykx IPC turns Python str into a generic list; wrap as q char list."""
-    return kx.q(f'"{sql}"')
+    """pykx IPC turns Python str into a generic list; wrap as q char list.
+
+    Internal double quotes in `sql` are escaped so nested q string literals
+    survive the round-trip through a q "..." literal.
+    """
+    escaped = sql.replace("\\", "\\\\").replace('"', '\\"')
+    return kx.q(f'"{escaped}"')
 
 
 def execute_query(sql: str) -> pa.Table:
@@ -72,6 +77,87 @@ def execute_update(sql: str) -> int:
     except (TypeError, ValueError):
         n = 0
     return n
+
+
+def execute_schema(sql: str) -> pa.Schema:
+    """Return the schema of a query without executing data."""
+    with _lock:
+        if _conn is None:
+            raise RuntimeError("not connected")
+        result = _conn(_as_q_string(sql))
+    return _to_pyarrow(result).schema
+
+
+def get_table_schema(catalog: Optional[str] = None,
+                     schema: Optional[str] = None,
+                     table: Optional[str] = None) -> pa.Schema:
+    """Return the schema of a named table.
+
+    The C shell calls with a single positional argument (the table name), which
+    lands in `catalog`; tolerate both call shapes.
+    """
+    if table is None:
+        table = catalog
+    if table is None:
+        raise RuntimeError("table required")
+    with _lock:
+        if _conn is None:
+            raise RuntimeError("not connected")
+        result = _conn(_as_q_string(f"0!{table}"))
+    return _to_pyarrow(result).schema
+
+
+def get_table_types() -> pa.Table:
+    """Return the supported table types as a pyarrow Table."""
+    with _lock:
+        if _conn is None:
+            raise RuntimeError("not connected")
+        result = _conn(_as_q_string("([]table_type:enlist \"TABLE\")"))
+    return _to_pyarrow(result)
+
+
+def get_info() -> pa.Table:
+    """Return driver metadata as a pyarrow Table."""
+    with _lock:
+        if _conn is None:
+            raise RuntimeError("not connected")
+        result = _conn(_as_q_string(
+            "([]info_name:enlist 0;info_value:enlist \"kdb-x\")"))
+    return _to_pyarrow(result)
+
+
+def get_objects() -> pa.Table:
+    """Return catalog objects as a pyarrow Table.
+
+    The server's AdbcConnectionGetObjects returns a nested q dictionary that
+    does not map directly to a flat Arrow table via tbl.pa(); build the ADBC
+    contract shape (catalog_name + nested catalog_db_schemas) from the dict.
+    """
+    with _lock:
+        if _conn is None:
+            raise RuntimeError("not connected")
+        result = _conn(_as_q_string(
+            "AdbcConnectionGetObjects[1;::;::;::;::]"))
+    data = result.py()
+    if not isinstance(data, dict):
+        data = {"catalog_name": [], "catalog_db_schemas": []}
+    catalogs = data.get("catalog_name", [])
+    schemas = data.get("catalog_db_schemas", [])
+    if not isinstance(catalogs, list):
+        catalogs = [catalogs]
+    if not isinstance(schemas, list):
+        schemas = [schemas]
+    # catalog_db_schemas is a list of dicts; wrap as a list<struct>
+    schema_arrays = []
+    for s in schemas:
+        if not isinstance(s, dict):
+            s = {}
+        schema_arrays.append(pa.StructArray.from_arrays(
+            [pa.array(s.get("db_schema_name", []) if isinstance(s.get("db_schema_name"), list) else [s.get("db_schema_name")])],
+            names=["db_schema_name"]))
+    return pa.Table.from_arrays(
+        [pa.array(catalogs), pa.array(schema_arrays, type=pa.list_(schema_arrays[0].type) if schema_arrays else pa.list_(pa.struct([])))],
+        names=["catalog_name", "catalog_db_schemas"])
 
 
 def _to_pyarrow(result: "kx.q") -> pa.Table:
