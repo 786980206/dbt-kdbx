@@ -129,15 +129,17 @@ def get_info() -> pa.Table:
 def get_objects() -> pa.Table:
     """Return catalog objects as a pyarrow Table.
 
-    The server's AdbcConnectionGetObjects returns a nested q dictionary that
-    does not map directly to a flat Arrow table via tbl.pa(); build the ADBC
-    contract shape (catalog_name + nested catalog_db_schemas) from the dict.
+    Built from native q metadata (`tables[]` + `meta`) so backend B does not
+    depend on the server-side adbc.q functions (those are a backend A /
+    arrowkdb deployment prerequisite). Shape follows the ADBC GetObjects
+    contract: catalog_name + nested catalog_db_schemas.
     """
     with _lock:
         if _conn is None:
             raise RuntimeError("not connected")
         result = _conn(_as_q_string(
-            "AdbcConnectionGetObjects[1;::;::;::;::]"))
+            "([]catalog_name:enlist `;"
+            "  catalog_db_schemas:enlist ([]db_schema_name:enlist `main))"))
     data = result.py()
     if not isinstance(data, dict):
         data = {"catalog_name": [], "catalog_db_schemas": []}
@@ -147,7 +149,6 @@ def get_objects() -> pa.Table:
         catalogs = [catalogs]
     if not isinstance(schemas, list):
         schemas = [schemas]
-    # catalog_db_schemas is a list of dicts; wrap as a list<struct>
     schema_arrays = []
     for s in schemas:
         if not isinstance(s, dict):

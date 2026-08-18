@@ -6,8 +6,9 @@ BUILD_DIR="$PROJECT_DIR/build"
 OUTPUT="$BUILD_DIR/libadbc_driver_kdbx.so"
 BACKEND_B="$PROJECT_DIR/kdbx_adbc/_backend_b.so"
 
-PYTHON_INC="$(/home/windsing/miniconda3/bin/python -c 'import sysconfig; print(sysconfig.get_path("include"))' 2>/dev/null || python3 -c 'import sysconfig; print(sysconfig.get_path("include"))')"
-PYTHON_LIB="$(/home/windsing/miniconda3/bin/python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))' 2>/dev/null || python3 -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
+PYTHON_BIN="${PYTHON:-$(command -v python3 || command -v python)}"
+PYTHON_INC="$($PYTHON_BIN -c 'import sysconfig; print(sysconfig.get_path("include"))')"
+PYTHON_LIB="$($PYTHON_BIN -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
 
 echo "=== adbc-driver-kdbx build ==="
 
@@ -30,6 +31,7 @@ cmake --build "$BUILD_DIR" -j"$(nproc)"
 # 4. Build backend B (embedded CPython + pykx shell)
 echo "[4/5] Building backend B (embedded CPython + pykx)..."
 mkdir -p "$PROJECT_DIR/kdbx_adbc"
+PY_VERSION="$($PYTHON_BIN -c 'import sys; print("python%d.%d" % sys.version_info[:2])')"
 gcc -fPIC -shared -O3 -fno-plt \
     -fdata-sections -ffunction-sections \
     -Wno-builtin-macro-redefined \
@@ -38,7 +40,7 @@ gcc -fPIC -shared -O3 -fno-plt \
     -Wl,--gc-sections -Wl,--strip-all \
     -o "$BACKEND_B" \
     "$PROJECT_DIR/src/cython/backend_b.c" \
-    -lpython3.10 -ldl
+    -l"$PY_VERSION" -ldl
 
 # 5. Verify
 echo "[5/5] Verifying..."

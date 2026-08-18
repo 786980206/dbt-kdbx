@@ -1,0 +1,167 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON: python
+  KDBX_PORT: 19500
+
+jobs:
+  build:
+    name: Build backends + Rust host
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: pip
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake gcc build-essential
+
+      - name: Install Python deps
+        run: |
+          pip install --upgrade pip
+          pip install pykx pyarrow adbc-driver-manager
+
+      - name: Build both backends
+        run: |
+          cd driver
+          ./build.sh
+
+      - name: Check exported symbols (backend A + B)
+        run: |
+          nm -D driver/build/libadbc_driver_kdbx.so | grep -q "AdbcDriverKdbxInit" && echo "backend A init symbol OK"
+          nm -D driver/kdbx_adbc/_backend_b.so | grep -q "AdbcBackendBInit" && echo "backend B init symbol OK"
+          nm -D driver/kdbx_adbc/_backend_b.so | grep -q "kdbx_b_init" && echo "backend B kdbx_b_* exported OK"
+
+      - name: Check artifacts not stripped of needed metadata
+        run: |
+          test -f driver/kdbx_adbc/libadbc_driver_kdbx.so && echo "backend A copied to wheel OK"
+          test -f driver/kdbx_adbc/bridge.py && echo "bridge.py present"
+
+      - name: Build Rust host (release)
+        run: |
+          cd driver/rust
+          cargo build --release --locked
+
+      - name: Verify Rust host links
+        run: |
+          ldd driver/rust/target/release/adbc_host | grep -q "libc" && echo "adbc_host links OK"
+
+  test:
+    name: Backend B full suite + Rust E2E
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: pip
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake gcc build-essential
+
+      - name: Install Python deps
+        run: |
+          pip install --upgrade pip
+          pip install pykx pyarrow adbc-driver-manager
+
+      - name: Build both backends
+        run: |
+          cd driver
+          ./build.sh
+
+      - name: Build Rust host
+        run: |
+          cd driver/rust
+          cargo build --release
+
+      - name: Start q server + seed trade table
+        run: |
+          cd driver
+          ./ci/start_server.sh "$KDBX_PORT"
+
+      - name: Backend B — full ADBC smoke suite (41/41)
+        run: |
+          cd driver
+          KDBX_BACKEND=b KDBX_PORT=$KDBX_PORT python -u test/test.py
+
+      - name: Rust host — backend B E2E
+        run: |
+          cd driver
+          ./rust/target/release/adbc_host \
+            ./kdbx_adbc/_backend_b.so AdbcBackendBInit \
+            127.0.0.1 "$KDBX_PORT" \
+            $'select sym, price from trade where sym = `aapl'
+
+      - name: Rust host — backend B full ADBC surface
+        run: |
+          cd driver
+          ./rust/target/release/adbc_host \
+            ./kdbx_adbc/_backend_b.so AdbcBackendBInit \
+            127.0.0.1 "$KDBX_PORT" --full
+
+  backend_a_runtime:
+    name: Backend A runtime (requires KX arrowkdb)
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 30
+    if: false  # requires the KX commercial kx.arrowkdb module; run manually on a licensed env
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake gcc build-essential
+
+      - name: Install Python deps
+        run: |
+          pip install --upgrade pip
+          pip install pykx pyarrow adbc-driver-manager
+
+      - name: Build both backends
+        run: |
+          cd driver
+          ./build.sh
+
+      - name: Note
+        run: |
+          echo "Backend A runtime suite requires the KX commercial kx.arrowkdb
+          module on the q server (adbc.q). It is skipped in normal CI; run it
+          on a licensed environment with a q server loaded from adbc.q:
+            q adbc.q -p $KDBX_PORT
+            KDBX_BACKEND=a python test/test.py"
