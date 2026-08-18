@@ -1,3 +1,7 @@
 [submodule "driver/thirdparty/nanoarrow"]
 	path = driver/thirdparty/nanoarrow
 	url = https://github.com/apache/arrow-nanoarrow.git
+[submodule "driver/dbt-core"]
+	path = driver/dbt-core
+	url = https://github.com/dbt-labs/dbt-core.git
+	branch = main

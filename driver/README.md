@@ -85,7 +85,9 @@ everything).
 
 ## CI
 
-`.github/workflows/ci.yml` runs the full build + verification matrix on every
-push / PR / tag: backend A & B builds, 41/41 smoke tests on both backends, and
-the Rust host E2E. It expects a `q` binary on PATH (see the workflow for how it
-is provisioned).
+`.github/workflows/ci.yml` builds both backends and the Rust host and verifies
+exported entry-point symbols. Runtime tests against a q server (backend B
+41/41 suite, Rust E2E) are **not** run in CI — they need a q server, which is
+flaky to provision on hosted runners (and backend A needs the commercial
+`kx.arrowkdb`). Run them locally with `./demo.sh` or `ci/start_server.sh` +
+`test/test.py`.

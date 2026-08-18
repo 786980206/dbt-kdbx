@@ -99,10 +99,10 @@ cd driver/rust && cargo build --release  # Rust ADBC host
 KDBX_BACKEND=b KDBX_PORT=19500 python driver/test/test.py  # backend B suite
 ```
 
-CI (`.github/workflows/ci.yml`) covers backend B 41/41 + Rust E2E on a pykx
-Community-Edition q server (`driver/ci/start_server.sh`). Backend A runtime
-needs the commercial `kx.arrowkdb` module (adbc.q), so CI builds/link-checks
-it only.
+CI (`.github/workflows/ci.yml`) is static-only: it builds both backends + the
+Rust host and checks exported entry-point symbols. q-server runtime tests are
+run locally (`./demo.sh`, or `ci/start_server.sh` + `test/test.py`); backend A
+runtime needs the commercial `kx.arrowkdb` module (adbc.q).
 
 ## Testing
 
