@@ -53,6 +53,7 @@ fn main() -> Result<(), String> {
     let host_addr = args.get(3).map(String::as_str).unwrap_or("127.0.0.1");
     let port = args.get(4).map(String::as_str).unwrap_or("19500");
     let full = args.iter().any(|a| a == "--full");
+    let query = args.get(5).cloned().unwrap_or_else(|| "select from trade".to_string());
 
     println!("== loading driver {path} entrypoint={entrypoint} ==");
     let host = unsafe { Host::load(path, entrypoint) }?;
@@ -121,7 +122,7 @@ fn main() -> Result<(), String> {
     // Statement + ExecuteQuery
     let mut stmt: AdbcStatement = unsafe { std::mem::zeroed() };
     unsafe { check(host.driver.statement_new.unwrap()(&mut conn, &mut stmt, &mut error), "StatementNew", &error)?; }
-    unsafe { check(host.driver.statement_set_sql_query.unwrap()(&mut stmt, cstr("select from trade").as_ptr(), &mut error), "SetSqlQuery", &error)?; }
+    unsafe { check(host.driver.statement_set_sql_query.unwrap()(&mut stmt, cstr(&query).as_ptr(), &mut error), "SetSqlQuery", &error)?; }
 
     let mut stream: ArrowArrayStream = unsafe { std::mem::zeroed() };
     let mut affected: i64 = 0;
