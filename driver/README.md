@@ -30,6 +30,9 @@ contains:
 pip install -e .           # or: uv pip install -e driver/
 ```
 
+Release artifacts are compiled with `-O3` + LTO (`-flto` / `thin`) and
+stripped; typical sizes: backend A ~280K, backend B ~20K, Rust host ~920K.
+
 ## Usage
 
 Load a q server with the ADBC functions, then use any ADBC client:
@@ -79,3 +82,10 @@ Note: in shell, symbol literals in the query must not be escaped, e.g.
 `$'select sym, price from trade where sym = `aapl'` (a backslash before the
 backtick turns it into a string comparison and the filter silently matches
 everything).
+
+## CI
+
+`.github/workflows/ci.yml` runs the full build + verification matrix on every
+push / PR / tag: backend A & B builds, 41/41 smoke tests on both backends, and
+the Rust host E2E. It expects a `q` binary on PATH (see the workflow for how it
+is provisioned).

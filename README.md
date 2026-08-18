@@ -8,7 +8,19 @@ library, with three native kdb+ storage layouts:
 - `splayed` — a directory with one column file per column
 - `partitioned` — date-partitioned directories (column files per partition)
 
-## Features
+This repository contains **two layers**:
+
+| Layer | Path | dbt-core |
+| --- | --- | --- |
+| v1 Python adapter | `dbt/` | 1.x (Python API) |
+| v2 ADBC driver | `driver/` | 2.x (Rust `dbt-xdbc` dlopens it) |
+
+See [`driver/README.md`](driver/README.md) for the v2 ADBC driver (dual backend,
+Rust host, one-shot demo, CI).
+
+## v1 Python adapter
+
+### Features
 
 - Full `table`, `view` (degraded to table), `incremental` (insert / upsert),
   and `ephemeral` materializations
@@ -16,13 +28,13 @@ library, with three native kdb+ storage layouts:
 - No SQL translation: compiled dbt queries are passed to q as-is via q lambdas
 - Minimal dependencies: PyKX + agate (no Pandas / Polars)
 
-## Requirements
+### Requirements
 
 - Python >= 3.10
 - dbt-core >= 1.8, dbt-adapters >= 1.0
 - PyKX >= 4.0.0 (includes an embedded KDB-X Community Edition for `local` mode)
 
-## Installation
+### Installation
 
 ```bash
 uv sync            # or: pip install -e .
@@ -35,7 +47,7 @@ The package registers itself through the `dbt` entry point group:
 kdbx = "dbt.adapters.kdbx"
 ```
 
-## Configuration
+### Configuration
 
 Add a `kdbx` profile to `~/.dbt/profiles.yml`:
 
@@ -71,7 +83,7 @@ your_project:
 > Note: kdb+ has no schema concept; the `schema` field is unused and relation
 > names render as bare identifiers.
 
-## Usage
+### Usage
 
 ```bash
 dbt run                    # build all models
@@ -99,7 +111,7 @@ select ...
 Views are not natively supported by q; `materialized='view'` logs a warning and
 falls back to a table.
 
-## Demo project
+### Demo project
 
 See [`demo/`](demo/) for a runnable example project (models, profile, and sample
 data already built):
@@ -114,7 +126,7 @@ dbt run -s model_incremental        # incremental upsert
 dbt run -s model_ephemeral          # ephemeral (CTE, no table written)
 ```
 
-## How it works
+### How it works
 
 - `dbt/adapters/kdbx/` — adapter package (namespace package sharing the
   installed `dbt` namespace):
@@ -130,7 +142,7 @@ dbt run -s model_ephemeral          # ephemeral (CTE, no table written)
   - `mod/qtk/` — vendored qtk library
 - `dbt/include/kdbx/` — dbt plugin include package (macros + `dbt_project.yml`)
 
-## Known limitations
+### Known limitations
 
 - No transaction support (kdb+ has none; `begin`/`commit`/`rollback` are no-ops)
 - No `seed` loading (`load_seed_data` is a no-op)
@@ -138,11 +150,33 @@ dbt run -s model_ephemeral          # ephemeral (CTE, no table written)
 - `dbt --version` does not list the namespace-registered plugin, though
   `dbt debug` recognizes it and connects correctly
 
-## Development
+### Development
 
 ```bash
 uv sync --dev
 cd demo && dbt debug && dbt run
+```
+
+## v2 ADBC driver
+
+The `driver/` directory holds the v2 layer for dbt-core 2.x (Fusion): an ADBC
+driver with a **dual backend**, built as a Python wheel (`adbc-driver-kdbx`)
+whose `kdbx_adbc` package ships both `.so` files:
+
+- **Backend A** (native C) — talks to a q server; `adbc.q` on the server side
+  uses arrowkdb to serialize q tables as Arrow IPC.
+- **Backend B** (embedded) — a C shell that embeds CPython, imports the pykx
+  bridge, and drives pykx in normal IPC mode. No embedded q, no KX licence.
+  Results cross back to the C host zero-copy via the Arrow C Data Interface.
+
+A minimal Rust host (`driver/rust/`) dlopens the driver with `RTLD_GLOBAL` and
+drives the ADBC C API end-to-end, exactly like the dbt-core v2 `dbt-xdbc`
+adapter will. See [`driver/README.md`](driver/README.md) for build / usage /
+tests, and `driver/rust/README.md` for the v2 integration mapping.
+
+```bash
+cd driver && ./build.sh   # both backends (artifacts ~280K / ~20K)
+cd driver && ./demo.sh    # one-shot verification: 41/41 per backend + Rust E2E
 ```
 
 ## License
