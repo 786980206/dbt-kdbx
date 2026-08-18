@@ -1,0 +1,11 @@
+[package]
+name = "adbc_host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libloading = "0.8"
+arrow = { version = "53", features = ["ffi", "csv"] }
+arrow-array = { version = "53", features = ["ffi"] }
+arrow-schema = "53"
+arrow-data = "53"
