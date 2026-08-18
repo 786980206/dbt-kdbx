@@ -48,9 +48,12 @@ jobs:
 
       - name: Check exported symbols (backend A + B)
         run: |
-          nm -D driver/build/libadbc_driver_kdbx.so | grep -q "AdbcDriverKdbxInit" && echo "backend A init symbol OK"
-          nm -D driver/kdbx_adbc/_backend_b.so | grep -q "AdbcBackendBInit" && echo "backend B init symbol OK"
-          nm -D driver/kdbx_adbc/_backend_b.so | grep -q "kdbx_b_init" && echo "backend B kdbx_b_* exported OK"
+          for sym in AdbcDriverKdbxInit; do
+            nm -D driver/build/libadbc_driver_kdbx.so | grep -q "$sym" && echo "backend A: $sym OK"
+          done
+          for sym in AdbcBackendBInit AdbcDriverKdbxBInit; do
+            nm -D driver/kdbx_adbc/_backend_b.so | grep -q "$sym" && echo "backend B: $sym OK"
+          done
 
       - name: Check artifacts not stripped of needed metadata
         run: |

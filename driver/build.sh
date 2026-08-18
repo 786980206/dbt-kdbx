@@ -56,7 +56,11 @@ else
 fi
 if [ -f "$BACKEND_B" ]; then
     echo "OK: $BACKEND_B ($(du -h "$BACKEND_B" | cut -f1))"
-    nm -D "$BACKEND_B" | grep -q kdbx_b_init && echo "  kdbx_b_* symbols exported"
+    if nm -D "$BACKEND_B" | grep -q AdbcBackendBInit && nm -D "$BACKEND_B" | grep -q AdbcDriverKdbxBInit; then
+        echo "  AdbcBackendBInit + AdbcDriverKdbxBInit exported"
+    else
+        echo "  WARN: expected entry points not found in dynamic symbols" >&2
+    fi
 else
     echo "FAIL: $BACKEND_B not found"
     exit 1
