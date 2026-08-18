@@ -5,6 +5,19 @@ set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Optimisation: -O3 + LTO where available; strip symbols from release builds.
+if(NOT CMAKE_BUILD_TYPE MATCHES "Debug")
+  add_compile_options(-O3 -fno-plt)
+  add_link_options(-Wl,--gc-sections -Wl,--strip-all)
+  add_compile_options(-fdata-sections -ffunction-sections)
+  include(CheckIPOSupported)
+  check_ipo_supported(RESULT _ipo_supported)
+  if(_ipo_supported)
+    add_compile_options(-flto)
+    add_link_options(-flto)
+  endif()
+endif()
+
 # nanoarrow (Arrow C Data Interface + IPC stream parsing)
 set(NANOARROW_IPC ON CACHE BOOL "Build nanoarrow IPC extension")
 add_subdirectory(

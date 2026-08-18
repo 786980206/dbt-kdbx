@@ -30,9 +30,12 @@ cmake --build "$BUILD_DIR" -j"$(nproc)"
 # 4. Build backend B (embedded CPython + pykx shell)
 echo "[4/5] Building backend B (embedded CPython + pykx)..."
 mkdir -p "$PROJECT_DIR/kdbx_adbc"
-gcc -fPIC -shared \
+gcc -fPIC -shared -O3 -fno-plt \
+    -fdata-sections -ffunction-sections \
+    -Wno-builtin-macro-redefined \
     -I"$PYTHON_INC" -I"$PROJECT_DIR/include" -L"$PYTHON_LIB" \
     -Wl,-rpath,"$PYTHON_LIB" \
+    -Wl,--gc-sections -Wl,--strip-all \
     -o "$BACKEND_B" \
     "$PROJECT_DIR/src/cython/backend_b.c" \
     -lpython3.10 -ldl
