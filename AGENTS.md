@@ -90,6 +90,20 @@ cd demo && dbt run            # build all models into demo/data
 cd demo && dbt run -s <model> # run one model
 ```
 
+## driver (v2) build + verification
+
+```bash
+cd driver && ./build.sh       # builds both backends (-O3/LTO/strip)
+cd driver && ./demo.sh        # one-shot verify: 41/41 per backend + Rust E2E
+cd driver/rust && cargo build --release  # Rust ADBC host
+KDBX_BACKEND=b KDBX_PORT=19500 python driver/test/test.py  # backend B suite
+```
+
+CI (`.github/workflows/ci.yml`) covers backend B 41/41 + Rust E2E on a pykx
+Community-Edition q server (`driver/ci/start_server.sh`). Backend A runtime
+needs the commercial `kx.arrowkdb` module (adbc.q), so CI builds/link-checks
+it only.
+
 ## Testing
 
 No automated test suite exists yet; the `demo/` project is the manual smoke
