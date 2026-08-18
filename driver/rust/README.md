@@ -22,7 +22,16 @@ does not need Python or pykx to compile.
 
 # Backend B (embedded CPython + pykx bridge)
 ./target/release/adbc_host ../kdbx_adbc/_backend_b.so AdbcBackendBInit 127.0.0.1 19500 --full
+
+# Run a specific dbt-compiled q expression (positional: host port query)
+./target/release/adbc_host ../build/libadbc_driver_kdbx.so AdbcDriverKdbxInit \
+    127.0.0.1 19500 "select sym, price from trade where size > 2000"
 ```
+
+With `--full` the host also exercises GetTableTypes / GetTableSchema / GetInfo
+/ GetObjects before the query. Without it, it runs only ExecuteQuery +
+ExecuteUpdate (the fifth positional argument is the query, defaulting to
+`select from trade`).
 
 Output verifies the full ADBC surface from Rust:
 
