@@ -56,5 +56,26 @@ backend at driver load; see `driver/src/` for the exported entry points.
 `test/test.py` is a C-API smoke test. Run a q server (see above) then:
 
 ```bash
-python test/test.py
+# backend A (native C)
+KDBX_BACKEND=a python test/test.py
+# backend B (embedded CPython + pykx)
+KDBX_BACKEND=b python test/test.py
 ```
+
+`KDBX_PORT` overrides the server port (default 9500). Both backends run 41/41.
+
+## One-shot demo
+
+`./demo.sh` starts a q server if needed, runs both backends' test.py (41/41
+each), then drives the Rust host (`rust/`) through the full ADBC surface and
+executes dbt-compiled q expressions end-to-end:
+
+```bash
+./demo.sh
+# or: KDBX_PORT=19001 ./demo.sh
+```
+
+Note: in shell, symbol literals in the query must not be escaped, e.g.
+`$'select sym, price from trade where sym = `aapl'` (a backslash before the
+backtick turns it into a string comparison and the filter silently matches
+everything).

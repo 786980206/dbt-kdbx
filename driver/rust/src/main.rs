@@ -53,9 +53,11 @@ fn main() -> Result<(), String> {
     let host_addr = args.get(3).map(String::as_str).unwrap_or("127.0.0.1");
     let port = args.get(4).map(String::as_str).unwrap_or("19500");
     let full = args.iter().any(|a| a == "--full");
-    let query = args.get(5).cloned().unwrap_or_else(|| "select from trade".to_string());
+    let query = args.iter().skip(5).find(|a| !a.starts_with("--"))
+        .cloned().unwrap_or_else(|| "select from trade".to_string());
 
     println!("== loading driver {path} entrypoint={entrypoint} ==");
+    println!("  query: {query}");
     let host = unsafe { Host::load(path, entrypoint) }?;
     println!("  driver loaded, init OK");
 
