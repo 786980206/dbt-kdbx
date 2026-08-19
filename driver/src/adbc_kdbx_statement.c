@@ -1,6 +1,27 @@
 #include "adbc_kdbx_private.h"
 #include "nanoarrow/nanoarrow_ipc.h"
 
+#include <ctype.h>
+
+/* ------------------------------------------------------------------ */
+/* Query text hygiene                                                 */
+/* ------------------------------------------------------------------ */
+
+/*
+ * dbt prepends a C-style query comment (`/* {"app":"dbt",...} *'/`) to every
+ * statement. q's `value` has no comment syntax, so strip any leading
+ * `/* ... *'/` block here in the driver before it reaches the server.
+ */
+static char* KdbxStripQueryComment(const char* sql) {
+  const char* p = sql;
+  while (*p && isspace((unsigned char)*p)) p++;
+  if (p[0] == '/' && p[1] == '*') {
+    const char* end = strstr(p + 2, "*/");
+    if (end) return strdup(end + 2);
+  }
+  return NULL; /* nothing stripped; caller keeps original */
+}
+
 /* ------------------------------------------------------------------ */
 /* Lifecycle                                                          */
 /* ------------------------------------------------------------------ */
@@ -46,8 +67,9 @@ AdbcStatusCode AdbcKdbxStatementSetSqlQuery(struct AdbcStatement* stmt, const ch
   if (!stmt || !stmt->private_data) { SetError(error, "NULL statement"); return ADBC_STATUS_INVALID_ARGUMENT; }
   if (!query) { SetError(error, "NULL query"); return ADBC_STATUS_INVALID_ARGUMENT; }
   KdbxStatement* ks = (KdbxStatement*)stmt->private_data;
+  char* stripped = KdbxStripQueryComment(query);
   free(ks->sql);
-  ks->sql = strdup(query);
+  ks->sql = stripped ? stripped : strdup(query);
   return ADBC_STATUS_OK;
 }
 

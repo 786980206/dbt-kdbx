@@ -1,0 +1,10 @@
+kdbx_v2_test:
+  outputs:
+    dev:
+      type: kdbx
+      host: localhost
+      port: 19500
+      database: kdbx
+      schema: default
+      threads: 1
+  target: dev

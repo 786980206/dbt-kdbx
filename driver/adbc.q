@@ -3,27 +3,31 @@ akdb:use`kx.arrowkdb;
 trade:([]time:2024.01.01D09:30:00.000000000+til 1000; sym:1000?`msft`ibm`goog`aapl; price:100.5+1000?1.0; size:100+1000?900);
 
 // @api: AdbcStatementExecuteQuery
+// Execute a q expression and serialize the resulting table to Arrow.
+// Accept plain (98) and keyed (99) tables; keyed -> unkey before Arrow
+// serialization. A scalar result (e.g. `1` from the connection probe) is
+// wrapped into a single-row table so the query path always yields a stream.
 AdbcStatementExecuteQuery:{[sql]
-    qresult:value sql;
-    $[98=type qresult;
-        akdb.ipc.serializeArrowFromTable[qresult;::];
-        '"only table results supported"
+    r:value sql;
+    $[99=type r; akdb.ipc.serializeArrowFromTable[0!r;::];
+      98=type r; akdb.ipc.serializeArrowFromTable[r;::];
+      akdb.ipc.serializeArrowFromTable[([] result:enlist r);::]
     ]};
 
 // @api: AdbcStatementExecuteSchema
 AdbcStatementExecuteSchema:{[sql]
     qresult:value sql;
-    $[98=type qresult;
-        akdb.ipc.serializeArrowFromTable[0!qresult;::];
-        '"only table results supported"
+    $[99=type qresult; akdb.ipc.serializeArrowFromTable[0!qresult;::];
+      98=type qresult; akdb.ipc.serializeArrowFromTable[qresult;::];
+      '"only table results supported"
     ]};
 
 // @api: AdbcStatementExecuteUpdate
+// Execute a DML/DDL expression and report rows affected. q update/delete
+// are functional (no mutation); dbt materialisations use upsert, so the
+// server-side should execute a persisting expression. For now: value the
+// sql; if it yields a scalar long, return it, else return 0.
 AdbcStatementExecuteUpdate:{[sql]
-    // Execute a DML/DDL expression and report rows affected. q update/delete
-    // are functional (no mutation); dbt materialisations use upsert, so the
-    // server-side should execute a persisting expression. For now: value the
-    // sql; if it yields a scalar long, return it, else return 0.
     result:value sql;
     $[-7=type result; result; -6=type result; result; 0j]};
 

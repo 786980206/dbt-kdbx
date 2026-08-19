@@ -1,0 +1,3 @@
+name: kdbx_v2_test
+profile: kdbx_v2_test
+model-paths: [models]
