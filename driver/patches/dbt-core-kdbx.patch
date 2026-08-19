@@ -1,0 +1,1322 @@
+diff --git a/crates/dbt-adapter-core/src/lib.rs b/crates/dbt-adapter-core/src/lib.rs
+index 9c39198..3d31d19 100644
+--- a/crates/dbt-adapter-core/src/lib.rs
++++ b/crates/dbt-adapter-core/src/lib.rs
+@@ -69,6 +69,8 @@ pub enum AdapterType {
+     ClickHouse,
+     /// Exasol
+     Exasol,
++    /// KDB-X / kdb+
++    Kdbx,
+     /// Athena
+     Athena,
+     /// Starburst
+@@ -118,6 +120,8 @@ pub fn quote_char(adapter_type: AdapterType) -> char {
+         ClickHouse => '`',
+         // Exasol is PostgreSQL-compatible, so it uses double quotes for identifiers.
+         Exasol => '"',
++        // kdb+ uses bare identifiers; quoting is ignored by the kdbx adapter.
++        Kdbx => '"',
+         Dremio => todo!("Dremio"),
+         Oracle => todo!("Oracle"),
+     }
+diff --git a/crates/dbt-adapter-sql/src/ident.rs b/crates/dbt-adapter-sql/src/ident.rs
+index c3cc181..ed94fad 100644
+--- a/crates/dbt-adapter-sql/src/ident.rs
++++ b/crates/dbt-adapter-sql/src/ident.rs
+@@ -121,7 +121,7 @@ pub fn max_identifier_length(adapter_type: AdapterType) -> Option<NonZero<usize>
+             Some(unsafe { NonZero::new_unchecked(127) })
+         }
+         Snowflake | Bigquery | Databricks | Spark | DuckDB | Salesforce | Fabric | ClickHouse
+-        | Exasol | Athena | Starburst | Trino | Datafusion | Dremio | Oracle | Alt => None,
++        | Exasol | Kdbx | Athena | Starburst | Trino | Datafusion | Dremio | Oracle | Alt => None,
+     }
+ }
+ 
+@@ -140,7 +140,7 @@ pub const fn canonical_quote(backend: AdapterType) -> QuotingStyle {
+     use AdapterType::*;
+     match backend {
+         Bigquery | Databricks | Spark | Athena => QuotingStyle::Backtick,
+-        ClickHouse | Exasol | Snowflake | Redshift | Postgres | Salesforce | DuckDB => {
++        ClickHouse | Exasol | Kdbx | Snowflake | Redshift | Postgres | Salesforce | DuckDB => {
+             QuotingStyle::Double
+         }
+         // https://learn.microsoft.com/en-us/sql/t-sql/statements/set-quoted-identifier-transact-sql?view=sql-server-ver17
+@@ -177,7 +177,8 @@ pub fn is_valid_ident_char(c: char, backend: AdapterType) -> bool {
+             | Dremio
+             | Oracle
+             | Alt
+-            | Exasol => c.is_alphanumeric() || c == '_',
++            | Exasol
++            | Kdbx => c.is_alphanumeric() || c == '_',
+     }
+ }
+ 
+diff --git a/crates/dbt-adapter-sql/src/statements.rs b/crates/dbt-adapter-sql/src/statements.rs
+index 8e4e2aa..7bfbf2c 100644
+--- a/crates/dbt-adapter-sql/src/statements.rs
++++ b/crates/dbt-adapter-sql/src/statements.rs
+@@ -22,6 +22,7 @@ pub fn is_update_statement(sql: &str, adapter_type: AdapterType) -> bool {
+         | AdapterType::DuckDB
+         | AdapterType::Fabric
+         | AdapterType::Exasol
++        | AdapterType::Kdbx
+         | AdapterType::Starburst
+         | AdapterType::Athena
+         | AdapterType::Trino
+diff --git a/crates/dbt-adapter/src/adapter/adapter_factory.rs b/crates/dbt-adapter/src/adapter/adapter_factory.rs
+index 52446d6..0f22133 100644
+--- a/crates/dbt-adapter/src/adapter/adapter_factory.rs
++++ b/crates/dbt-adapter/src/adapter/adapter_factory.rs
+@@ -43,6 +43,7 @@ pub fn backend_of(adapter_type: AdapterType) -> Backend {
+         AdapterType::Fabric => Backend::SQLServer,
+         AdapterType::ClickHouse => Backend::ClickHouse,
+         AdapterType::Exasol => Backend::Exasol,
++        AdapterType::Kdbx => Backend::Kdbx,
+         AdapterType::Starburst => todo!("Starburst"),
+         AdapterType::Athena => Backend::Athena,
+         AdapterType::Trino => todo!("Trino"),
+diff --git a/crates/dbt-adapter/src/adapter/adapter_impl.rs b/crates/dbt-adapter/src/adapter/adapter_impl.rs
+index a179c2e..abebac3 100644
+--- a/crates/dbt-adapter/src/adapter/adapter_impl.rs
++++ b/crates/dbt-adapter/src/adapter/adapter_impl.rs
+@@ -704,6 +704,7 @@ impl AdapterImpl {
+                         ClickHouse => Box::new(ClickHouseMetadataAdapter::new(engine))
+                             as Box<dyn MetadataAdapter>,
+                         Exasol => return None,
++                        Kdbx => return None,
+                         Starburst => todo!("Starburst"),
+                         Athena => todo!("Athena"),
+                         Trino => todo!("Trino"),
+@@ -1025,6 +1026,7 @@ impl AdapterImpl {
+             Exasol | Athena | Starburst | Trino | Datafusion | Dremio | Oracle => {
+                 unimplemented!("valid_incremental_strategies not implemented")
+             }
++            Kdbx => &[Append],
+         }
+     }
+ 
+@@ -1114,14 +1116,16 @@ impl AdapterImpl {
+             //
+             // Alt: also supports batching
+             Bigquery | DuckDB | Alt => vec![sql.to_string()],
++            // Kdbx: the model SQL is a q expression (not SQL); it must never be
++            // split/lexed as SQL.
++            Kdbx => vec![sql.to_string()],
+             _ => splitter.split(sql, adapter_type),
+         };
+         // Filter out empty and comment-only statements.
+         let statements = all_stmts
+             .into_iter()
+             .filter(|stmt| !splitter.is_empty(stmt, adapter_type))
+-            .collect::<Vec<_>>();
+-        if statements.is_empty() {
++            .collect::<Vec<_>>();        if statements.is_empty() {
+             return Ok((AdapterResponse::default(), AgateTable::default()));
+         }
+ 
+@@ -1506,13 +1510,13 @@ impl AdapterImpl {
+             }
+             Replay(
+                 adapter_type @ (Postgres | Redshift | Salesforce | DuckDB | Alt | Spark | Fabric
+-                | ClickHouse | Exasol | Starburst | Athena | Trino | Datafusion
++                | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Datafusion
+                 | Dremio | Oracle),
+                 _,
+             )
+             | Impl(
+                 adapter_type @ (Postgres | Redshift | Salesforce | DuckDB | Alt | Spark | Fabric
+-                | ClickHouse | Exasol | Starburst | Athena | Trino | Datafusion
++                | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Datafusion
+                 | Dremio | Oracle),
+                 _,
+             ) => Err(AdapterError::new(
+@@ -1544,7 +1548,7 @@ impl AdapterImpl {
+                 self.list_schemas_via_adbc(state, database)
+             }
+             Snowflake | Databricks | Redshift | Spark | DuckDB | Postgres | Salesforce | Fabric
+-            | ClickHouse | Exasol | Athena | Starburst | Trino | Datafusion | Dremio | Oracle
++            | ClickHouse | Exasol | Kdbx | Athena | Starburst | Trino | Datafusion | Dremio | Oracle
+             | Alt | Bigquery => {
+                 use crate::macro_exec::execute_macro_wrapper;
+                 use minijinja::value::{Kwargs, Value};
+@@ -1658,6 +1662,7 @@ impl AdapterImpl {
+                 // https://github.com/ClickHouse/dbt-clickhouse/blob/main/dbt/include/clickhouse/macros/adapters.sql
+                 ClickHouse => "name",
+                 Exasol => "name",
++                Kdbx => "name",
+                 Starburst => todo!("Starburst"),
+                 Athena => todo!("Athena"),
+                 Trino => todo!("Trino"),
+@@ -1942,7 +1947,7 @@ impl AdapterImpl {
+                 )])))
+             }
+             Postgres | Bigquery | Databricks | Redshift | Salesforce | Spark | DuckDB | Alt
+-            | Fabric | ClickHouse | Exasol | Starburst | Athena | Trino | Datafusion | Dremio
++            | Fabric | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Datafusion | Dremio
+             | Oracle => {
+                 let err = format!(
+                     "describe_dynamic_table is not supported by the {} adapter",
+@@ -2359,7 +2364,7 @@ impl AdapterImpl {
+             // NOTE: This is the default behavior. If said adapter type does not
+             // have a get_columns_in_relation() macro, it will fail with a
+             // "macro does not exist" error
+-            Athena | ClickHouse | Datafusion | Dremio | DuckDB | Alt | Exasol | Fabric | Oracle
++            Athena | ClickHouse | Datafusion | Dremio | DuckDB | Alt | Exasol | Kdbx | Fabric | Oracle
+             | Postgres | Redshift | Salesforce | Snowflake | Spark | Starburst | Trino => {
+                 execute_macro(
+                     state,
+@@ -2648,7 +2653,7 @@ impl AdapterImpl {
+             }
+             Impl(
+                 Snowflake | Databricks | Redshift | Salesforce | Postgres | Spark | DuckDB | Alt
+-                | Fabric | ClickHouse | Exasol | Starburst | Athena | Trino | Datafusion | Dremio
++                | Fabric | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Datafusion | Dremio
+                 | Oracle,
+                 _,
+             ) => {
+@@ -2699,7 +2704,7 @@ impl AdapterImpl {
+             }
+             Impl(
+                 Postgres | Bigquery | Databricks | Redshift | Spark | DuckDB | Alt | Fabric
+-                | ClickHouse | Exasol | Starburst | Athena | Trino | Datafusion | Dremio | Oracle,
++                | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Datafusion | Dremio | Oracle,
+                 _,
+             ) => {
+                 if quote_config.unwrap_or(true) {
+@@ -2931,7 +2936,7 @@ impl AdapterImpl {
+                 Ok(none_value())
+             }
+             Postgres | Snowflake | Databricks | Redshift | Salesforce | Spark | Fabric | DuckDB
+-            | Alt | ClickHouse | Exasol | Starburst | Athena | Trino | Datafusion | Dremio
++            | Alt | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Datafusion | Dremio
+             | Oracle => {
+                 unimplemented!("only available with BigQuery adapter")
+             }
+@@ -2947,7 +2952,7 @@ impl AdapterImpl {
+     ) -> AdapterResult<Vec<String>> {
+         match self.adapter_type() {
+             Postgres | Snowflake | Databricks | Redshift | Salesforce | Spark | DuckDB | Alt
+-            | Fabric | ClickHouse | Exasol | Starburst | Athena | Trino | Datafusion | Dremio
++            | Fabric | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Datafusion | Dremio
+             | Oracle => {
+                 let mut result = vec![];
+                 for (_, column) in columns_map {
+@@ -3143,7 +3148,7 @@ impl AdapterImpl {
+ 
+             // Salesforce
+             (
+-                Salesforce | Spark | ClickHouse | Exasol | Starburst | Athena | Trino | Datafusion
++                Salesforce | Spark | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Datafusion
+                 | Dremio | Oracle,
+                 _,
+             ) => {
+@@ -3445,7 +3450,7 @@ impl AdapterImpl {
+ 
+                 Ok(result)
+             }
+-            Salesforce | Spark | Fabric | ClickHouse | Exasol | Starburst | Athena | Trino
++            Salesforce | Spark | Fabric | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino
+             | Datafusion | Dremio | Oracle => {
+                 unimplemented!("grants not implemented")
+             }
+@@ -3475,7 +3480,7 @@ impl AdapterImpl {
+                 Ok(AgateTable::from_record_batch(Arc::new(catalog)))
+             }
+             Snowflake | Bigquery | Databricks | Spark | DuckDB | Alt | Postgres | Salesforce
+-            | Fabric | ClickHouse | Exasol | Athena | Starburst | Trino | Datafusion | Dremio
++            | Fabric | ClickHouse | Exasol | Kdbx | Athena | Starburst | Trino | Datafusion | Dremio
+             | Oracle => Err(AdapterError::new(
+                 AdapterErrorKind::NotSupported,
+                 "build_catalog_from_show_tables_and_svv_columns is only supported for Redshift",
+@@ -3491,7 +3496,7 @@ impl AdapterImpl {
+         match self.adapter_type() {
+             Bigquery => nest_column_data_types(columns, constraints),
+             Postgres | Snowflake | Databricks | Redshift | Salesforce | Spark | DuckDB | Alt
+-            | Fabric | ClickHouse | Exasol | Starburst | Athena | Trino | Datafusion | Dremio
++            | Fabric | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Datafusion | Dremio
+             | Oracle => {
+                 unimplemented!("only available with BigQuery adapter")
+             }
+@@ -3530,7 +3535,7 @@ impl AdapterImpl {
+         match self.adapter_type() {
+             Bigquery => Ok(Value::from(render_struct_projection(col_name, data_type))),
+             Postgres | Snowflake | Databricks | Redshift | Salesforce | Spark | DuckDB | Alt
+-            | Fabric | ClickHouse | Exasol | Starburst | Athena | Trino | Datafusion | Dremio
++            | Fabric | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Datafusion | Dremio
+             | Oracle => {
+                 unimplemented!("only available with BigQuery adapter")
+             }
+@@ -3628,7 +3633,7 @@ impl AdapterImpl {
+                 Ok(none_value())
+             }
+             Postgres | Snowflake | Databricks | Redshift | Salesforce | Spark | DuckDB | Alt
+-            | Fabric | ClickHouse | Exasol | Starburst | Athena | Trino | Datafusion | Dremio
++            | Fabric | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Datafusion | Dremio
+             | Oracle => {
+                 unimplemented!("only available with BigQuery adapter")
+             }
+@@ -3682,7 +3687,7 @@ impl AdapterImpl {
+                 Self::parse_dataset_location(&batch)
+             }
+             Postgres | Snowflake | Databricks | Redshift | Salesforce | Spark | DuckDB | Alt
+-            | Fabric | ClickHouse | Exasol | Starburst | Athena | Trino | Datafusion | Dremio
++            | Fabric | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Datafusion | Dremio
+             | Oracle => {
+                 unimplemented!("only available with BigQuery adapter")
+             }
+@@ -3740,7 +3745,7 @@ impl AdapterImpl {
+                 Ok(none_value())
+             }
+             Postgres | Snowflake | Databricks | Redshift | Salesforce | Spark | DuckDB | Alt
+-            | Fabric | ClickHouse | Exasol | Starburst | Athena | Trino | Datafusion | Dremio
++            | Fabric | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Datafusion | Dremio
+             | Oracle => {
+                 unimplemented!("only available with BigQuery adapter")
+             }
+@@ -3817,7 +3822,7 @@ impl AdapterImpl {
+             }
+             Salesforce => todo!("load_dataframe() for the Salesforce adapter"),
+             Postgres | Snowflake | Databricks | Redshift | Spark | DuckDB | Alt | Fabric
+-            | ClickHouse | Exasol | Starburst | Athena | Trino | Datafusion | Dremio | Oracle => {
++            | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Datafusion | Dremio | Oracle => {
+                 unimplemented!("only available with BigQuery or Salesforce adapter")
+             }
+         }
+@@ -3878,7 +3883,7 @@ impl AdapterImpl {
+                 Ok(none_value())
+             }
+             Postgres | Snowflake | Databricks | Redshift | Salesforce | Spark | DuckDB | Alt
+-            | Fabric | ClickHouse | Exasol | Starburst | Athena | Trino | Datafusion | Dremio
++            | Fabric | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Datafusion | Dremio
+             | Oracle => {
+                 unimplemented!("only available with BigQuery adapter")
+             }
+@@ -4027,7 +4032,7 @@ impl AdapterImpl {
+             }
+             Impl(
+                 adapter_type @ (Snowflake | Bigquery | Databricks | Salesforce | Spark | Fabric
+-                | Exasol | Starburst | Athena | Trino | Datafusion | Dremio
++                | Exasol | Kdbx | Starburst | Athena | Trino | Datafusion | Dremio
+                 | Oracle),
+                 _,
+             ) => {
+@@ -4100,7 +4105,7 @@ impl AdapterImpl {
+                 }
+             }
+             adapter_type @ (Postgres | Snowflake | Databricks | Redshift | Salesforce | Spark
+-            | DuckDB | Alt | Fabric | ClickHouse | Exasol | Starburst | Athena
++            | DuckDB | Alt | Fabric | ClickHouse | Exasol | Kdbx | Starburst | Athena
+             | Trino | Datafusion | Dremio | Oracle) => {
+                 unimplemented!(
+                     "is_replaceable is only available with BigQuery adapter, not {}",
+@@ -4165,7 +4170,7 @@ impl AdapterImpl {
+                 Ok(Value::from_object(validated_config))
+             }
+             Postgres | Snowflake | Databricks | Redshift | Salesforce | Spark | DuckDB | Alt
+-            | Fabric | ClickHouse | Exasol | Starburst | Athena | Trino | Datafusion | Dremio
++            | Fabric | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Datafusion | Dremio
+             | Oracle => {
+                 unimplemented!("only available with BigQuery adapter")
+             }
+@@ -4189,7 +4194,7 @@ impl AdapterImpl {
+                 adapter_type,
+             ),
+             Postgres | Snowflake | Databricks | Redshift | Salesforce | Spark | DuckDB | Alt
+-            | Fabric | ClickHouse | Exasol | Starburst | Athena | Trino | Datafusion | Dremio
++            | Fabric | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Datafusion | Dremio
+             | Oracle => {
+                 unimplemented!("only available with BigQuery adapter")
+             }
+@@ -4213,7 +4218,7 @@ impl AdapterImpl {
+                 ),
+             ),
+             Postgres | Snowflake | Databricks | Redshift | Salesforce | Spark | DuckDB | Alt
+-            | Fabric | ClickHouse | Exasol | Starburst | Athena | Trino | Datafusion | Dremio
++            | Fabric | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Datafusion | Dremio
+             | Oracle => {
+                 unimplemented!("only available with BigQuery adapter")
+             }
+@@ -4240,7 +4245,7 @@ impl AdapterImpl {
+                 Ok(Value::from_serialize(options))
+             }
+             Postgres | Snowflake | Databricks | Redshift | Salesforce | Spark | DuckDB | Alt
+-            | Fabric | ClickHouse | Exasol | Starburst | Athena | Trino | Datafusion | Dremio
++            | Fabric | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Datafusion | Dremio
+             | Oracle => Err(minijinja::Error::new(
+                 minijinja::ErrorKind::InvalidOperation,
+                 "get_common_options is only available with BigQuery adapter",
+@@ -4282,7 +4287,7 @@ impl AdapterImpl {
+                 Ok(Value::from(result))
+             }
+             Postgres | Snowflake | Databricks | Redshift | Salesforce | Spark | DuckDB | Alt
+-            | Fabric | ClickHouse | Exasol | Starburst | Athena | Trino | Datafusion | Dremio
++            | Fabric | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Datafusion | Dremio
+             | Oracle => {
+                 unimplemented!("only available with BigQuery adapter")
+             }
+@@ -4357,7 +4362,7 @@ impl AdapterImpl {
+                 fabric::list_relations(engine.as_ref(), query_ctx, conn, db_schema, token)
+             }
+             Impl(
+-                adapter_type @ (Postgres | Salesforce | ClickHouse | Exasol | Starburst | Athena
++                adapter_type @ (Postgres | Salesforce | ClickHouse | Exasol | Kdbx | Starburst | Athena
+                 | Trino | Datafusion | Dremio | Oracle),
+                 _,
+             ) => {
+@@ -4468,7 +4473,7 @@ impl AdapterImpl {
+                 Ok(Value::from(result))
+             }
+             Postgres | Snowflake | Bigquery | Redshift | Salesforce | Spark | DuckDB | Alt
+-            | Fabric | ClickHouse | Exasol | Starburst | Athena | Trino | Datafusion | Dremio
++            | Fabric | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Datafusion | Dremio
+             | Oracle => {
+                 unimplemented!("only available with Databricksadapter")
+             }
+@@ -4625,7 +4630,7 @@ impl AdapterImpl {
+             }
+ 
+             Postgres | Snowflake | Bigquery | Redshift | Salesforce | Spark | DuckDB | Alt
+-            | Fabric | ClickHouse | Exasol | Starburst | Athena | Trino | Datafusion | Dremio
++            | Fabric | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Datafusion | Dremio
+             | Oracle => {
+                 unimplemented!("only available with Databricks adapter")
+             }
+@@ -4703,7 +4708,7 @@ impl AdapterImpl {
+                 Ok(())
+             }
+             Postgres | Snowflake | Bigquery | Redshift | Salesforce | Spark | DuckDB | Alt
+-            | Fabric | ClickHouse | Exasol | Starburst | Athena | Trino | Datafusion | Dremio
++            | Fabric | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Datafusion | Dremio
+             | Oracle => {
+                 unimplemented!("only available with Databricks adapter")
+             }
+@@ -4796,7 +4801,7 @@ impl AdapterImpl {
+                 Ok(!use_managed_iceberg)
+             }
+             Postgres | Snowflake | Bigquery | Redshift | Salesforce | Spark | DuckDB | Alt
+-            | Fabric | ClickHouse | Exasol | Starburst | Athena | Trino | Datafusion | Dremio
++            | Fabric | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Datafusion | Dremio
+             | Oracle => {
+                 unimplemented!("only available with Databricks adapter")
+             }
+@@ -5129,7 +5134,7 @@ impl AdapterImpl {
+                 Ok(())
+             }
+             Postgres | Snowflake | Databricks | Redshift | Salesforce | Spark | DuckDB | Alt
+-            | Fabric | ClickHouse | Exasol | Starburst | Athena | Trino | Datafusion | Dremio
++            | Fabric | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Datafusion | Dremio
+             | Oracle => {
+                 unimplemented!("only available with BigQuery adapter")
+             }
+@@ -5522,7 +5527,7 @@ pub(crate) fn adapter_specific_behavior_flags(adapter_type: AdapterType) -> Vec<
+             );
+             vec![skip_autocommit_transaction_statements, grants_extended]
+         }
+-        Postgres | Salesforce | Spark | DuckDB | Alt | ClickHouse | Exasol | Starburst | Athena
++        Postgres | Salesforce | Spark | DuckDB | Alt | ClickHouse | Exasol | Kdbx | Starburst | Athena
+         | Trino | Datafusion | Dremio | Oracle => vec![],
+     }
+ }
+diff --git a/crates/dbt-adapter/src/column/column_builder.rs b/crates/dbt-adapter/src/column/column_builder.rs
+index fb34864..aba37f2 100644
+--- a/crates/dbt-adapter/src/column/column_builder.rs
++++ b/crates/dbt-adapter/src/column/column_builder.rs
+@@ -31,6 +31,7 @@ impl ColumnBuilder {
+             Fabric => Ok(Self::build_fabric(field, type_ops)),
+             ClickHouse => Self::build_clickhouse(field, type_ops),
+             Exasol => Ok(Self::build_postgres_like(field, type_ops)),
++            Kdbx => Ok(Self::build_postgres_like(field, type_ops)),
+             Starburst => todo!("Starburst"),
+             Athena => todo!("Athena"),
+             Trino => todo!("Trino"),
+@@ -118,6 +119,14 @@ impl ColumnBuilder {
+                 numeric_precision,
+                 numeric_scale,
+             ),
++            Kdbx => Column::new(
++                Kdbx,
++                name,
++                dtype,
++                char_size,
++                numeric_precision,
++                numeric_scale,
++            ),
+             Starburst => todo!("Starburst"),
+             Athena => todo!("Athena"),
+             Trino => todo!("Trino"),
+diff --git a/crates/dbt-adapter/src/metadata/get_relation.rs b/crates/dbt-adapter/src/metadata/get_relation.rs
+index e11c604..66d6975 100644
+--- a/crates/dbt-adapter/src/metadata/get_relation.rs
++++ b/crates/dbt-adapter/src/metadata/get_relation.rs
+@@ -82,6 +82,7 @@ pub fn get_relation(
+         AdapterType::Exasol => exasol_get_relation(
+             adapter, state, ctx, conn, database, schema, identifier, token,
+         ),
++        AdapterType::Kdbx => kdbx_get_relation(adapter, conn, database, schema, identifier),
+         AdapterType::Starburst => todo!("Starburst"),
+         AdapterType::Athena => todo!("Athena"),
+         AdapterType::Trino => todo!("Trino"),
+@@ -784,6 +785,29 @@ fn exasol_get_relation(
+     Ok(Some(relation))
+ }
+ 
++fn kdbx_get_relation(
++    adapter: &AdapterImpl,
++    conn: &mut dyn Connection,
++    database: &str,
++    schema: &str,
++    identifier: &str,
++) -> AdapterResult<Option<Box<dyn BaseRelation>>> {
++    match conn.get_table_schema(Some(database), Some(schema), identifier) {
++        Ok(_) => Ok(Some(Box::new(
++            Relation::new(
++                AdapterType::Kdbx,
++                database.to_string(),
++                Some(schema.to_string()),
++                identifier.to_string(),
++            )
++            .with_relation_type(RelationType::Table)
++            .with_quoting(adapter.quoting())
++            .validate()?,
++        ))),
++        Err(_) => Ok(None),
++    }
++}
++
+ fn salesforce_get_relation(
+     _adapter: &AdapterImpl,
+     _state: &State,
+diff --git a/crates/dbt-adapter/src/relation/factory.rs b/crates/dbt-adapter/src/relation/factory.rs
+index 424180f..3b0bda4 100644
+--- a/crates/dbt-adapter/src/relation/factory.rs
++++ b/crates/dbt-adapter/src/relation/factory.rs
+@@ -16,7 +16,7 @@ pub fn create_static_relation(
+ ) -> Option<Value> {
+     use AdapterType::*;
+     let result = match adapter_type {
+-        Snowflake | Databricks | Spark | Fabric | DuckDB | Alt | Exasol | Postgres | Redshift
++        Snowflake | Databricks | Spark | Fabric | DuckDB | Alt | Exasol | Kdbx | Postgres | Redshift
+         | Salesforce | Bigquery | ClickHouse => {
+             let relation_type = RelationStatic {
+                 adapter_type,
+diff --git a/crates/dbt-adapter/src/sql_types.rs b/crates/dbt-adapter/src/sql_types.rs
+index 3f49a84..82c2fc8 100644
+--- a/crates/dbt-adapter/src/sql_types.rs
++++ b/crates/dbt-adapter/src/sql_types.rs
+@@ -551,6 +551,7 @@ pub const fn get_field_sql_type_metadata_key(adapter_type: AdapterType) -> &'sta
+         AdapterType::Fabric => FABRIC_METADATA_SQL_TYPE_KEY,
+         AdapterType::ClickHouse => CLICKHOUSE_METADATA_SQL_TYPE_KEY,
+         AdapterType::Exasol => "DATA_TYPE",
++        AdapterType::Kdbx => "DATA_TYPE",
+         AdapterType::Starburst => todo!(),
+         AdapterType::Athena => todo!(),
+         AdapterType::Trino => todo!(),
+@@ -603,7 +604,7 @@ impl SdfSchemaBuilder {
+                 metadata.get(ARROW_FIELD_COMMENT_METADATA_KEY)
+             }
+             // no evidence that these drivers store comments in metadata, but just in case
+-            Postgres | Snowflake | Salesforce | Fabric | ClickHouse | Exasol | Starburst
++            Postgres | Snowflake | Salesforce | Fabric | ClickHouse | Exasol | Kdbx | Starburst
+             | Athena | Trino | Dremio | Oracle | Datafusion => {
+                 metadata.get(ARROW_FIELD_COMMENT_METADATA_KEY)
+             }
+@@ -641,7 +642,7 @@ impl SdfSchemaBuilder {
+         use AdapterType::*;
+         match self.adapter_type {
+             Bigquery | Redshift | Databricks | Spark | DuckDB | Alt | Fabric | ClickHouse
+-            | Exasol | Starburst | Athena | Trino | Dremio | Oracle | Datafusion => {
++            | Exasol | Kdbx | Starburst | Athena | Trino | Dremio | Oracle | Datafusion => {
+                 let original_fields = self.original.fields();
+                 let mut sdf_fields = Vec::with_capacity(original_fields.len());
+                 for field in original_fields {
+@@ -972,7 +973,7 @@ pub const fn max_varchar_size(adapter_type: AdapterType) -> Option<usize> {
+         Snowflake => Some(16_777_216),
+         Redshift => Some(256),
+         Postgres | Bigquery | Databricks | Salesforce | Spark | DuckDB | Alt | Fabric
+-        | ClickHouse | Exasol | Starburst | Athena | Trino | Dremio | Oracle | Datafusion => None,
++        | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Dremio | Oracle | Datafusion => None,
+     }
+ }
+ 
+@@ -983,7 +984,7 @@ pub const fn max_varbinary_size(adapter_type: AdapterType) -> Option<usize> {
+         Redshift => Some(65_535),
+         // TODO: define limits for more systems
+         Postgres | Bigquery | Databricks | Salesforce | Spark | DuckDB | Alt | Fabric
+-        | ClickHouse | Exasol | Starburst | Athena | Trino | Dremio | Oracle | Datafusion => None,
++        | ClickHouse | Exasol | Kdbx | Starburst | Athena | Trino | Dremio | Oracle | Datafusion => None,
+     }
+ }
+ 
+diff --git a/crates/dbt-adapter/src/stmt_splitter.rs b/crates/dbt-adapter/src/stmt_splitter.rs
+index 40c7bce..6e43222 100644
+--- a/crates/dbt-adapter/src/stmt_splitter.rs
++++ b/crates/dbt-adapter/src/stmt_splitter.rs
+@@ -33,6 +33,8 @@ impl StmtSplitter for DefaultStmtSplitter {
+ 
+         let by_dialect = |dialect: Dialect| is_empty_or_comment_only(sql, dialect);
+         match adapter_type {
++            // Kdbx SQL is a q expression; only treat truly-blank input as empty.
++            Kdbx => sql.trim().is_empty(),
+             Snowflake => by_dialect(Dialect::Snowflake),
+             Bigquery => by_dialect(Dialect::Bigquery),
+             Databricks | Spark => by_dialect(Dialect::Databricks),
+diff --git a/crates/dbt-adbc/src/driver.rs b/crates/dbt-adbc/src/driver.rs
+index 920bca7..3167aa7 100644
+--- a/crates/dbt-adbc/src/driver.rs
++++ b/crates/dbt-adbc/src/driver.rs
+@@ -84,6 +84,8 @@ pub enum Backend {
+     ClickHouse,
+     /// Exasol driver implementation (ADBC).
+     Exasol,
++    /// KDB-X / kdb+ driver implementation (ADBC).
++    Kdbx,
+     /// Generic ADBC driver implementation.
+     ///
+     /// This variant is fully dynamic and experimental. Features might not work reliably and fail
+@@ -116,6 +118,7 @@ impl fmt::Display for Backend {
+             Backend::Athena => write!(f, "Athena"),
+             Backend::ClickHouse => write!(f, "ClickHouse"),
+             Backend::Exasol => write!(f, "Exasol"),
++            Backend::Kdbx => write!(f, "Kdbx"),
+             Backend::Generic { library_name, .. } => write!(f, "Generic({library_name})"),
+         }
+     }
+@@ -137,6 +140,7 @@ impl Backend {
+             Backend::Athena => Some("adbc_driver_athena"),
+             Backend::ClickHouse => Some("adbc_clickhouse"),
+             Backend::Exasol => Some("adbc_driver_exasol"),
++            Backend::Kdbx => Some("adbc_driver_kdbx"),
+             Backend::Generic { library_name, .. } => Some(library_name),
+         }
+     }
+@@ -146,6 +150,7 @@ impl Backend {
+             Backend::Snowflake => Some(b"SnowflakeDriverInit"),
+             Backend::DuckDB | Backend::DuckDBExtended => Some(b"duckdb_adbc_init"),
+             Backend::Alt => Some(b"AdbcDriverDbtInit"),
++            Backend::Kdbx => Some(b"AdbcDriverKdbxInit"),
+             Backend::Generic {
+                 library_name: _,
+                 entrypoint,
+@@ -408,7 +413,7 @@ impl AdbcDriver {
+                 }
+             }
+             // CDN strategy for non-CDN drivers: just fall back to the system strategy.
+-            (CdnCache | SystemThenCdnCache | Remote, Athena | Exasol) => System(None),
++            (CdnCache | SystemThenCdnCache | Remote, Athena | Exasol | Kdbx) => System(None),
+             // Generic drivers can only be loaded from a file, so fallback to the System strategy.
+             (CdnCache | SystemThenCdnCache | Remote, Generic { library_name, .. }) => {
+                 System(Some(library_name.to_string()))
+diff --git a/crates/dbt-adbc/src/install.rs b/crates/dbt-adbc/src/install.rs
+index 9cc5ba6..f4fcdfd 100644
+--- a/crates/dbt-adbc/src/install.rs
++++ b/crates/dbt-adbc/src/install.rs
+@@ -367,7 +367,7 @@ fn canonical_name_and_version(backend: Backend) -> (&'static str, &'static str)
+         Backend::Alt => ("dbt", ALT_DRIVER_VERSION),
+         Backend::SQLServer => ("mssql", MSSQLSERVER_DRIVER_VERSION),
+         Backend::ClickHouse => ("clickhouse", CLICKHOUSE_DRIVER_VERSION),
+-        Backend::Athena | Backend::Exasol | Backend::Generic { .. } => {
++        Backend::Athena | Backend::Exasol | Backend::Kdbx | Backend::Generic { .. } => {
+             unreachable!("driver_parameters() called with backend={:?}", backend)
+         }
+     }
+diff --git a/crates/dbt-adbc/src/repl.rs b/crates/dbt-adbc/src/repl.rs
+index 6bf2f53..ec05add 100644
+--- a/crates/dbt-adbc/src/repl.rs
++++ b/crates/dbt-adbc/src/repl.rs
+@@ -33,6 +33,7 @@ fn parse_backend(s: &str) -> Result<Backend> {
+         "athena" => Ok(Backend::Athena),
+         "clickhouse" => Ok(Backend::ClickHouse),
+         "exasol" => Ok(Backend::Exasol),
++        "kdbx" | "kdb" => Ok(Backend::Kdbx),
+         _ => Err(Error::with_message_and_status(
+             format!("Unsupported backend: {s}"),
+             Status::InvalidArguments,
+diff --git a/crates/dbt-auth/src/kdbx/mod.rs b/crates/dbt-auth/src/kdbx/mod.rs
+new file mode 100644
+index 0000000..418dacd
+--- /dev/null
++++ b/crates/dbt-auth/src/kdbx/mod.rs
+@@ -0,0 +1,136 @@
++use crate::{AdapterConfig, Auth, AuthError, AuthOutcome, auth_configure_pipeline};
++use database::Builder as DatabaseBuilder;
++use dbt_adbc::{Backend, database};
++use std::borrow::Cow;
++
++const DEFAULT_HOST: &str = "localhost";
++const DEFAULT_PORT: &str = "5000";
++
++#[derive(Debug)]
++enum KdbxAuthIR<'a> {
++    Uri {
++        host: &'a str,
++        port: Cow<'a, str>,
++        username: Option<&'a str>,
++        password: Option<&'a str>,
++    },
++}
++
++impl<'a> KdbxAuthIR<'a> {
++    pub fn apply(self, mut builder: DatabaseBuilder) -> Result<DatabaseBuilder, AuthError> {
++        match self {
++            Self::Uri {
++                host,
++                port,
++                username,
++                password,
++            } => {
++                let uri = format!("kdbx://{host}:{port}");
++                builder.with_parse_uri(uri)?;
++                if let Some(username) = username {
++                    builder.with_username(username);
++                }
++                if let Some(password) = password {
++                    builder.with_password(password);
++                }
++            }
++        }
++
++        Ok(builder)
++    }
++}
++
++fn parse_auth<'a>(config: &'a AdapterConfig) -> Result<KdbxAuthIR<'a>, AuthError> {
++    Ok(KdbxAuthIR::Uri {
++        host: config.get_str("host").unwrap_or(DEFAULT_HOST),
++        port: config
++            .get_string("port")
++            .unwrap_or(Cow::Borrowed(DEFAULT_PORT)),
++        username: config.get_str("username"),
++        password: config.get_str("password"),
++    })
++}
++
++fn apply_connection_args(
++    _config: &AdapterConfig,
++    builder: DatabaseBuilder,
++) -> Result<DatabaseBuilder, AuthError> {
++    Ok(builder)
++}
++
++pub struct KdbxAuth;
++
++impl Auth for KdbxAuth {
++    fn backend(&self) -> Backend {
++        Backend::Kdbx
++    }
++
++    fn configure(&self, config: &AdapterConfig) -> Result<AuthOutcome, AuthError> {
++        auth_configure_pipeline!(self.backend(), &config, parse_auth, apply_connection_args)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::test_options::uri_value;
++    use dbt_test_primitives::assert_contains;
++    use dbt_yaml::Mapping;
++
++    #[test]
++    fn test_defaults() {
++        let config = Mapping::from_iter([]);
++
++        let builder = KdbxAuth {}
++            .configure(&AdapterConfig::new(config))
++            .expect("configure")
++            .builder;
++
++        let uri = uri_value(&builder);
++        assert_contains!(&uri, "kdbx://localhost:5000");
++    }
++
++    #[test]
++    fn test_custom_host_port() {
++        let config = Mapping::from_iter([
++            ("host".into(), "q.prod.internal".into()),
++            ("port".into(), "19500".into()),
++        ]);
++
++        let builder = KdbxAuth {}
++            .configure(&AdapterConfig::new(config))
++            .expect("configure")
++            .builder;
++
++        let uri = uri_value(&builder);
++        assert_contains!(&uri, "kdbx://q.prod.internal:19500");
++    }
++
++    #[test]
++    fn test_numeric_port() {
++        let config = Mapping::from_iter([("port".into(), 19500i64.into())]);
++
++        let builder = KdbxAuth {}
++            .configure(&AdapterConfig::new(config))
++            .expect("configure")
++            .builder;
++
++        let uri = uri_value(&builder);
++        assert_contains!(&uri, "kdbx://localhost:19500");
++    }
++
++    #[test]
++    fn test_credentials() {
++        let config = Mapping::from_iter([
++            ("username".into(), "dev".into()),
++            ("password".into(), "secret".into()),
++        ]);
++
++        let builder = KdbxAuth {}
++            .configure(&AdapterConfig::new(config))
++            .expect("configure")
++            .builder;
++
++        assert_eq!(uri_value(&builder), "kdbx://localhost:5000");
++    }
++}
+\ No newline at end of file
+diff --git a/crates/dbt-auth/src/lib.rs b/crates/dbt-auth/src/lib.rs
+index 84fdf0c..9192559 100644
+--- a/crates/dbt-auth/src/lib.rs
++++ b/crates/dbt-auth/src/lib.rs
+@@ -15,6 +15,7 @@ mod clickhouse;
+ mod databricks;
+ mod duckdb;
+ mod exasol;
++mod kdbx;
+ #[cfg(test)]
+ mod flock;
+ mod postgres;
+@@ -94,6 +95,7 @@ pub fn auth_for_backend(
+         Backend::ClickHouse => Box::new(clickhouse::ClickHouseAuth {}),
+         Backend::Athena => Box::new(athena::AthenaAuth {}),
+         Backend::Exasol => Box::new(exasol::ExasolAuth {}),
++        Backend::Kdbx => Box::new(kdbx::KdbxAuth {}),
+         Backend::Generic { .. } => unimplemented!("generic backend authentication"),
+     }
+ }
+diff --git a/crates/dbt-df-providers/src/seed_io.rs b/crates/dbt-df-providers/src/seed_io.rs
+index 49cd1f3..979a2ed 100644
+--- a/crates/dbt-df-providers/src/seed_io.rs
++++ b/crates/dbt-df-providers/src/seed_io.rs
+@@ -233,6 +233,7 @@ pub fn infer_seed_column_name_strategy(
+             | AdapterType::Fabric,
+         ) => InferColumnNameStrategy::Verbatim,
+         (false, AdapterType::ClickHouse) => InferColumnNameStrategy::Verbatim,
++        (false, AdapterType::Kdbx) => InferColumnNameStrategy::Verbatim,
+         (false, AdapterType::Exasol) => InferColumnNameStrategy::Uppercase,
+         (false, AdapterType::Starburst) => todo!("Starburst"),
+         (false, AdapterType::Athena) => todo!("Athena"),
+diff --git a/crates/dbt-init/src/adapter_config/kdbx_config.rs b/crates/dbt-init/src/adapter_config/kdbx_config.rs
+new file mode 100644
+index 0000000..5f00b9f
+--- /dev/null
++++ b/crates/dbt-init/src/adapter_config/kdbx_config.rs
+@@ -0,0 +1,158 @@
++use super::common::*;
++use crate::{ErrorCode, FsResult, fs_err};
++use dbt_schemas::schemas::profiles::KdbxDbConfig;
++use dbt_schemas::schemas::serde::StringOrInteger;
++
++impl InteractiveSetup for KdbxDbConfig {
++    fn get_fields() -> Vec<ConfigField> {
++        vec![
++            ConfigField {
++                name: "host".to_string(),
++                field_type: FieldType::Input {
++                    default: Some("localhost".to_string()),
++                },
++                condition: FieldCondition::Always,
++                prompt: "Host (q server hostname)".to_string(),
++                required: true,
++            },
++            ConfigField {
++                name: "port".to_string(),
++                field_type: FieldType::Input {
++                    default: Some("5000".to_string()),
++                },
++                condition: FieldCondition::Always,
++                prompt: "Port (q server port)".to_string(),
++                required: true,
++            },
++            ConfigField {
++                name: "username".to_string(),
++                field_type: FieldType::Input {
++                    default: Some("".to_string()),
++                },
++                condition: FieldCondition::Always,
++                prompt: "Username (optional)".to_string(),
++                required: false,
++            },
++            ConfigField {
++                name: "password".to_string(),
++                field_type: FieldType::Password,
++                condition: FieldCondition::Always,
++                prompt: "Password (optional)".to_string(),
++                required: false,
++            },
++            ConfigField {
++                name: "database".to_string(),
++                field_type: FieldType::Input {
++                    default: Some("kdbx".to_string()),
++                },
++                condition: FieldCondition::Always,
++                prompt: "Database".to_string(),
++                required: true,
++            },
++            ConfigField {
++                name: "schema".to_string(),
++                field_type: FieldType::Input {
++                    default: Some("".to_string()),
++                },
++                condition: FieldCondition::Always,
++                prompt: "Schema".to_string(),
++                required: true,
++            },
++        ]
++    }
++
++    fn set_field(&mut self, field_name: &str, value: FieldValue) -> FsResult<()> {
++        match field_name {
++            "host" => {
++                if let FieldValue::String(val) = value {
++                    self.host = Some(val);
++                }
++            }
++            "port" => match value {
++                FieldValue::String(val) => {
++                    if let Ok(port) = val.parse::<i64>() {
++                        self.port = Some(StringOrInteger::Integer(port));
++                    }
++                }
++                FieldValue::Integer(val) => {
++                    self.port = Some(StringOrInteger::Integer(val));
++                }
++                _ => {}
++            },
++            "username" => {
++                if let FieldValue::String(val) = value {
++                    self.username = Some(val);
++                }
++            }
++            "password" => {
++                if let FieldValue::String(val) = value {
++                    self.password = Some(val);
++                }
++            }
++            "database" => {
++                if let FieldValue::String(val) = value {
++                    self.database = Some(val);
++                }
++            }
++            "schema" => {
++                if let FieldValue::String(val) = value {
++                    self.schema = Some(val);
++                }
++            }
++            _ => {
++                return Err(fs_err!(
++                    ErrorCode::InvalidArgument,
++                    "Unknown field: {}",
++                    field_name
++                ));
++            }
++        }
++        Ok(())
++    }
++
++    fn get_field(&self, field_name: &str) -> Option<FieldValue> {
++        match field_name {
++            "host" => self.host.as_ref().map(|v| FieldValue::String(v.clone())),
++            "port" => self.port.as_ref().map(|v| match v {
++                StringOrInteger::String(s) => FieldValue::String(s.clone()),
++                StringOrInteger::Integer(i) => FieldValue::Integer(*i),
++            }),
++            "username" => self
++                .username
++                .as_ref()
++                .map(|v| FieldValue::String(v.clone())),
++            "password" => self
++                .password
++                .as_ref()
++                .map(|v| FieldValue::String(v.clone())),
++            "database" => self.database.as_ref().map(|v| FieldValue::String(v.clone())),
++            "schema" => self.schema.as_ref().map(|v| FieldValue::String(v.clone())),
++            _ => None,
++        }
++    }
++
++    fn is_field_set(&self, field_name: &str) -> bool {
++        match field_name {
++            "host" => self.host.is_some(),
++            "port" => self.port.is_some(),
++            "username" => self.username.is_some(),
++            "password" => self.password.is_some(),
++            "database" => self.database.is_some(),
++            "schema" => self.schema.is_some(),
++            _ => false,
++        }
++    }
++}
++
++pub fn setup_kdbx_profile(
++    existing_config: Option<&KdbxDbConfig>,
++) -> FsResult<Box<KdbxDbConfig>> {
++    let default_config = KdbxDbConfig::default();
++    let mut config = ConfigProcessor::process_config(existing_config.or(Some(&default_config)))?;
++
++    if config.threads.is_none() {
++        config.threads = Some(StringOrInteger::Integer(1));
++    }
++
++    Ok(Box::new(config))
++}
+\ No newline at end of file
+diff --git a/crates/dbt-init/src/adapter_config/mod.rs b/crates/dbt-init/src/adapter_config/mod.rs
+index 2697517..e63474d 100644
+--- a/crates/dbt-init/src/adapter_config/mod.rs
++++ b/crates/dbt-init/src/adapter_config/mod.rs
+@@ -3,6 +3,7 @@ pub mod clickhouse_config;
+ pub mod common;
+ pub mod databricks_config;
+ pub mod fabric_config;
++pub mod kdbx_config;
+ pub mod postgres_config;
+ pub mod redshift_config;
+ pub mod snowflake_config;
+@@ -11,6 +12,7 @@ pub use bigquery_config::setup_bigquery_profile;
+ pub use clickhouse_config::setup_clickhouse_profile;
+ pub use databricks_config::setup_databricks_profile;
+ pub use fabric_config::setup_fabric_profile;
++pub use kdbx_config::setup_kdbx_profile;
+ pub use postgres_config::setup_postgres_profile;
+ pub use redshift_config::setup_redshift_profile;
+ pub use snowflake_config::setup_snowflake_profile;
+diff --git a/crates/dbt-init/src/profile_setup.rs b/crates/dbt-init/src/profile_setup.rs
+index 032c462..bf1b799 100644
+--- a/crates/dbt-init/src/profile_setup.rs
++++ b/crates/dbt-init/src/profile_setup.rs
+@@ -1,6 +1,7 @@
+ use crate::adapter_config::{
+     setup_bigquery_profile, setup_clickhouse_profile, setup_databricks_profile,
+-    setup_fabric_profile, setup_postgres_profile, setup_redshift_profile, setup_snowflake_profile,
++    setup_fabric_profile, setup_kdbx_profile, setup_postgres_profile, setup_redshift_profile,
++    setup_snowflake_profile,
+ };
+ use crate::dbt_cloud_client::{CloudProject, DbtCloudClient, DbtCloudYml};
+ use crate::yaml_utils::{
+@@ -409,6 +410,13 @@ impl ProfileSetup {
+                 )?)
+             }
+             AdapterType::Exasol => todo!("Exasol"),
++            AdapterType::Kdbx => {
++                let kdbx_config = match existing_config {
++                    Some(DbConfig::Kdbx(config)) => Some(config),
++                    _ => None,
++                };
++                DbConfig::Kdbx(setup_kdbx_profile(kdbx_config.map(Box::as_ref))?)
++            }
+             AdapterType::Starburst => todo!("Starburst"),
+             AdapterType::Athena => todo!("Athena"),
+             AdapterType::Trino => todo!("Trino"),
+diff --git a/crates/dbt-loader/src/dbt_macro_assets/dbt-kdbx/dbt_project.yml b/crates/dbt-loader/src/dbt_macro_assets/dbt-kdbx/dbt_project.yml
+new file mode 100644
+index 0000000..d750e7c
+--- /dev/null
++++ b/crates/dbt-loader/src/dbt_macro_assets/dbt-kdbx/dbt_project.yml
+@@ -0,0 +1,4 @@
++name: dbt_kdbx
++version: '1.0'
++config-version: 2
++macro-paths: ["macros"]
+\ No newline at end of file
+diff --git a/crates/dbt-loader/src/dbt_macro_assets/dbt-kdbx/macros/adapters.sql b/crates/dbt-loader/src/dbt_macro_assets/dbt-kdbx/macros/adapters.sql
+new file mode 100644
+index 0000000..c44742f
+--- /dev/null
++++ b/crates/dbt-loader/src/dbt_macro_assets/dbt-kdbx/macros/adapters.sql
+@@ -0,0 +1,75 @@
++-- dbt-kdbx (kdb+/KDB-X) adapter macros.
++--
++-- dbt models compile to q expressions that are evaluated on the q server
++-- (the server-side `AdbcStatementExecuteQuery`/`AdbcStatementExecuteUpdate`
++-- run `value` on the given string). There is no SQL DDL on kdb+: a "table" is
++-- just a global q variable, so every materialization reduces to a q
++-- assignment.
++--
++-- Rules of thumb:
++-- * create_table_as / create_view_as return the q assignment as the macro
++--   body (no `statement()` call); the materialization runs it as the main
++--   query and expects a table back.
++-- * drop/rename/schema operations are side-effecting DDL; they must be
++--   wrapped in `{% call statement(...) %}` so dbt actually executes them
++--   (via the update path, which expects a scalar).
++
++{% macro kdbx__create_table_as(temporary, relation, sql) -%}
++  {{ relation.identifier }}: {{ sql }}; {{ relation.identifier }}
++{%- endmacro %}
++
++{% macro kdbx__create_view_as(relation, sql) -%}
++  {{ relation.identifier }}: {{ sql }}; {{ relation.identifier }}
++{%- endmacro %}
++
++{% macro kdbx__drop_relation(relation) -%}
++  {% call statement('drop_relation', auto_begin=False) -%}
++    value "delete {{ relation.identifier }} from `."; 0
++  {%- endcall %}
++{% endmacro %}
++
++{% macro kdbx__rename_relation(from_relation, to_relation) -%}
++  {% call statement('rename_relation', auto_begin=False) -%}
++    {{ to_relation.identifier }}: {{ from_relation.identifier }}; value "delete {{ from_relation.identifier }} from `."; 0
++  {%- endcall %}
++{% endmacro %}
++
++-- kdb+ has no SQL schema concept; a q variable lives in the root namespace.
++-- These are no-ops that still produce a queryable scalar for the DDL path.
++{% macro kdbx__create_schema(relation) -%}
++  {% call statement('create_schema') -%}
++    0
++  {%- endcall %}
++{% endmacro %}
++
++{% macro kdbx__drop_schema(relation) -%}
++  {% call statement('drop_schema') -%}
++    0
++  {%- endcall %}
++{% endmacro %}
++
++{% macro kdbx__list_schemas(database) -%}
++  ([] a:())
++{%- endmacro %}
++
++{% macro kdbx__check_schema_exists(information_schema, schema) -%}
++  ([] a:())
++{%- endmacro %}
++
++{% macro kdbx__get_columns_in_relation(relation) -%}
++  {{ return([]) }}
++{%- endmacro %}
++
++{% macro kdbx__list_relations_without_caching(schema_relation) -%}
++  {{ return([]) }}
++{%- endmacro %}
++
++{% macro kdbx__current_timestamp() -%}
++  .z.p
++{%- endmacro %}
++
++{% macro kdbx__truncate_relation(relation) -%}
++  {% call statement('truncate_relation') -%}
++    {{ relation.identifier }}: 0#{{ relation.identifier }}; count {{ relation.identifier }}
++  {%- endcall %}
++{% endmacro %}
+diff --git a/crates/dbt-schemas/src/schemas/profiles.rs b/crates/dbt-schemas/src/schemas/profiles.rs
+index f4fa9c3..93cb189 100644
+--- a/crates/dbt-schemas/src/schemas/profiles.rs
++++ b/crates/dbt-schemas/src/schemas/profiles.rs
+@@ -52,6 +52,7 @@ pub enum DbConfig {
+     Alt(Box<AltConfig>),
+     // Hive,
+     Exasol(Box<ExasolDbConfig>),
++    Kdbx(Box<KdbxDbConfig>),
+     // Oracle,
+     // Synapse,
+     Fabric(Box<FabricDbConfig>),
+@@ -105,6 +106,7 @@ impl_from_db_config!(Databricks, DatabricksDbConfig);
+ impl_from_db_config!(DuckDB, DuckDbConfig);
+ impl_from_db_config!(Fabric, FabricDbConfig);
+ impl_from_db_config!(Exasol, ExasolDbConfig);
++impl_from_db_config!(Kdbx, KdbxDbConfig);
+ impl_from_db_config!(ClickHouse, ClickHouseDbConfig);
+ 
+ impl DbConfig {
+@@ -124,6 +126,7 @@ impl DbConfig {
+             DbConfig::Spark(config) => config.host.as_deref(),
+             DbConfig::Fabric(config) => config.host.as_deref(),
+             DbConfig::Exasol(config) => config.host.as_deref(),
++            DbConfig::Kdbx(config) => config.host.as_deref(),
+             DbConfig::ClickHouse(config) => config.host.as_deref(),
+         }
+     }
+@@ -281,6 +284,7 @@ impl DbConfig {
+                 "encryption",
+                 "certificate_validation",
+             ],
++            DbConfig::Kdbx(_) => &["host", "port", "username", "password", "schema"],
+             DbConfig::ClickHouse(_) => &[
+                 "database",
+                 "schema",
+@@ -343,6 +347,7 @@ impl DbConfig {
+             DbConfig::DuckDB(config) => dbt_yaml::to_value(config),
+             DbConfig::Alt(config) => dbt_yaml::to_value(config),
+             DbConfig::Exasol(config) => dbt_yaml::to_value(config),
++            DbConfig::Kdbx(config) => dbt_yaml::to_value(config),
+             DbConfig::ClickHouse(config) => dbt_yaml::to_value(config),
+         }
+     }
+@@ -361,6 +366,7 @@ impl DbConfig {
+             DbConfig::Spark(..) => AdapterType::Spark,
+             DbConfig::Fabric(..) => AdapterType::Fabric,
+             DbConfig::Exasol(..) => AdapterType::Exasol,
++            DbConfig::Kdbx(..) => AdapterType::Kdbx,
+             DbConfig::ClickHouse(..) => AdapterType::ClickHouse,
+             DbConfig::Alt(..) => AdapterType::Alt,
+         }
+@@ -380,6 +386,7 @@ impl DbConfig {
+             DbConfig::Spark(_) => None,
+             DbConfig::Fabric(config) => config.database.as_ref(),
+             DbConfig::Exasol(config) => config.database.as_ref(),
++            DbConfig::Kdbx(config) => config.database.as_ref(),
+             DbConfig::ClickHouse(config) => config.database.as_ref(),
+             DbConfig::Alt(config) => config.database.as_ref(),
+         }
+@@ -421,6 +428,7 @@ impl DbConfig {
+             DbConfig::Salesforce(_) => None,
+             DbConfig::Fabric(config) => config.schema.as_ref(),
+             DbConfig::Exasol(config) => config.schema.as_ref(),
++            DbConfig::Kdbx(config) => config.schema.as_ref(),
+             DbConfig::ClickHouse(config) => config.schema.as_ref(),
+         }
+     }
+@@ -439,6 +447,7 @@ impl DbConfig {
+             DbConfig::Spark(_) => None,
+             DbConfig::Fabric(_) => None,
+             DbConfig::Exasol(config) => config.threads.as_ref(),
++            DbConfig::Kdbx(config) => config.threads.as_ref(),
+             DbConfig::ClickHouse(config) => config.threads.as_ref(),
+             DbConfig::Alt(config) => config.threads.as_ref(),
+         }
+@@ -458,6 +467,7 @@ impl DbConfig {
+             DbConfig::Spark(_) => (),
+             DbConfig::Fabric(_) => (),
+             DbConfig::Exasol(config) => config.threads = threads,
++            DbConfig::Kdbx(config) => config.threads = threads,
+             DbConfig::ClickHouse(config) => config.threads = threads,
+             DbConfig::Alt(config) => config.threads = threads,
+         }
+@@ -1312,6 +1322,25 @@ pub struct ExasolDbConfig {
+     pub threads: Option<StringOrInteger>,
+ }
+ 
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, DbtSchema, Merge)]
++#[merge(strategy = merge_strategies_extend::overwrite_option)]
++#[serde(rename_all = "snake_case")]
++pub struct KdbxDbConfig {
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub host: Option<String>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub port: Option<StringOrInteger>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub username: Option<String>,
++    #[serde(skip_serializing_if = "Option::is_none", alias = "pass")]
++    pub password: Option<String>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub database: Option<String>,
++    pub schema: Option<String>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub threads: Option<StringOrInteger>,
++}
++
+ #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, DbtSchema, Merge)]
+ #[merge(strategy = merge_strategies_extend::overwrite_option)]
+ #[serde(rename_all = "snake_case")]
+@@ -1541,6 +1570,7 @@ pub enum TargetContext {
+     Spark(SparkTargetEnv),
+     Fabric(FabricTargetEnv),
+     Exasol(ExasolTargetEnv),
++    Kdbx(KdbxTargetEnv),
+     ClickHouse(ClickHouseTargetEnv),
+     // Add other variants as needed
+ }
+@@ -1724,6 +1754,14 @@ pub struct ExasolTargetEnv {
+     pub __common__: CommonTargetContext,
+ }
+ 
++#[derive(Serialize, DbtSchema)]
++#[serde(rename_all = "snake_case")]
++pub struct KdbxTargetEnv {
++    pub host: Option<String>,
++    pub port: Option<StringOrInteger>,
++    pub __common__: CommonTargetContext,
++}
++
+ #[derive(Serialize, DbtSchema)]
+ #[serde(rename_all = "snake_case")]
+ pub struct ClickHouseTargetEnv {
+@@ -2148,6 +2186,20 @@ impl TryFrom<DbConfig> for TargetContext {
+                 },
+             })),
+ 
++            DbConfig::Kdbx(config) => Ok(TargetContext::Kdbx(KdbxTargetEnv {
++                host: config.host.clone(),
++                port: config.port.clone(),
++                __common__: CommonTargetContext {
++                    database: config
++                        .database
++                        .clone()
++                        .unwrap_or_else(|| "kdbx".to_string()),
++                    schema: config.schema.ok_or_else(|| missing("schema"))?,
++                    type_: adapter_type,
++                    threads: None,
++                },
++            })),
++
+             DbConfig::ClickHouse(config) => Ok(TargetContext::ClickHouse(ClickHouseTargetEnv {
+                 driver: config.driver.clone(),
+                 host: config.host.clone(),
+diff --git a/crates/dbt-schemas/src/schemas/relations/base.rs b/crates/dbt-schemas/src/schemas/relations/base.rs
+index 319b01c..afe58c7 100644
+--- a/crates/dbt-schemas/src/schemas/relations/base.rs
++++ b/crates/dbt-schemas/src/schemas/relations/base.rs
+@@ -559,6 +559,11 @@ pub trait BaseRelation: BaseRelationProperties + Any + Send + Sync + fmt::Debug
+                 end.map(|end| format!("{event_time} < parseDateTime64BestEffort('{end}', 9)")),
+             ),
+             AdapterType::Exasol => todo!("Exasol"),
++            // kdb+ timestamps compare natively as lexicographic datetime values.
++            AdapterType::Kdbx => (
++                start.map(|start| format!("{event_time} >= {start}")),
++                end.map(|end| format!("{event_time} < {end}")),
++            ),
+             AdapterType::Starburst => todo!("Starburst"),
+             AdapterType::Athena => todo!("Athena"),
+             AdapterType::Trino => todo!("Trino"),
+diff --git a/crates/dbt-tasks-sa/src/debug.rs b/crates/dbt-tasks-sa/src/debug.rs
+index af4ab48..1aff6bb 100644
+--- a/crates/dbt-tasks-sa/src/debug.rs
++++ b/crates/dbt-tasks-sa/src/debug.rs
+@@ -9,6 +9,7 @@ use dbt_common::io_args::{EvalArgs, LocalExecutionBackendKind};
+ use dbt_common::tracing::dbt_emit::emit_info_progress_message;
+ use dbt_common::{ErrorCode, FsResult, fs_err};
+ use dbt_compilation::core::DbtLoadedProject;
++use dbt_adapter_core::AdapterType;
+ use dbt_schemas::schemas::profiles::{DbConfig, Execute};
+ use dbt_tasks_core::alt_propagation::{AltPropagationChecker, AltPropagationOutcome};
+ use dbt_telemetry::ProgressMessage;
+@@ -156,7 +157,13 @@ pub async fn debug(
+         let base_adapter =
+             loaded_project.init_base_adapter(adapter_type, config_as_mapping, token.clone())?;
+ 
+-        let sql = "select 1 as id";
++        // Attempt connection. The generic probe is `select 1 as id`; kdb+
++        // cannot parse that (q's `select` requires a FROM clause), so probe
++        // with the scalar `1` instead — a valid q expression.
++        let sql = match adapter_type {
++            AdapterType::Kdbx => "1",
++            _ => "select 1 as id",
++        };
+         let ctx = QueryCtx::default();
+         let connection_test_started = Instant::now();
+         base_adapter
+diff --git a/crates/dbt-tasks-sa/src/sql/dialect.rs b/crates/dbt-tasks-sa/src/sql/dialect.rs
+index 6257328..ec5181d 100644
+--- a/crates/dbt-tasks-sa/src/sql/dialect.rs
++++ b/crates/dbt-tasks-sa/src/sql/dialect.rs
+@@ -35,6 +35,6 @@ pub fn sqlparser_dialect_for(adapter_type: AdapterType) -> &'static dyn Dialect
+         ClickHouse => &CLICKHOUSE,
+         // No close sqlparser match — generic SQL tokenizer is permissive enough
+         // for statement splitting.
+-        Trino | Athena | Starburst | Datafusion | Dremio | Oracle | Salesforce | Exasol => &GENERIC,
++        Trino | Athena | Starburst | Datafusion | Dremio | Oracle | Salesforce | Exasol | Kdbx => &GENERIC,
+     }
+ }

@@ -104,6 +104,31 @@ Rust host and checks exported entry-point symbols. q-server runtime tests are
 run locally (`./demo.sh`, or `ci/start_server.sh` + `test/test.py`); backend A
 runtime needs the commercial `kx.arrowkdb` module (adbc.q).
 
+## dbt-core v2 (Rust) integration
+
+The v2 adapter work lives in the `driver/dbt-core` **submodule**, which is
+pinned to a clean upstream dbt-core commit (read-only remote). The Kdbx
+adapter registration is **not committed inside the submodule**; it is
+`driver/patches/dbt-core-kdbx.patch`. The submodule working tree always has
+the patch applied (uncommitted).
+
+```bash
+./build_dbt_core.sh          # init submodule, apply patch, cargo build dbt-sa-cli
+cd demo-v2 && dbt run        # v2 smoke test (see demo-v2/README.md)
+```
+
+To upgrade dbt-core: bump the submodule to a newer upstream commit, then
+re-apply the patch and resolve conflicts:
+
+```bash
+cd driver/dbt-core && git apply --reverse ../patches/dbt-core-kdbx.patch
+# ... bump submodule pointer ...
+git apply ../patches/dbt-core-kdbx.patch   # fix conflicts, then re-export:
+git diff <base> > ../patches/dbt-core-kdbx.patch   # if the patch itself changed
+```
+
+Never commit inside the submodule.
+
 ## Testing
 
 No automated test suite exists yet; the `demo/` project is the manual smoke

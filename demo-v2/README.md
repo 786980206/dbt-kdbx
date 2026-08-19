@@ -28,7 +28,10 @@ demo-v2/
    see `driver/build.sh`).
 
 3. The `dbt-sa-cli` binary built with the kdbx adapter registered
-   (`../build_dbt_core.sh`). The binary is searched via `LD_LIBRARY_PATH`.
+   (`../build_dbt_core.sh`). The script inits the `driver/dbt-core` submodule
+   (pinned to an upstream dbt-core commit), applies the Kdbx registration
+   patch (`driver/patches/dbt-core-kdbx.patch`), then builds. The binary is
+   searched via `LD_LIBRARY_PATH`.
 
 ## Run
 
